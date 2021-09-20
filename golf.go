@@ -23,9 +23,9 @@ Try these on your command line.
   golf -M fmt,math -e 'fmt.Println(math.Pi)'
 
   # Some standard library packages are imported automatically.
-  # goimports runs for you in any case, so -M is often not needed.
+  # goimports can run for you with -g, so -M is often not needed.
   golf -e 'fmt.Fprint(os.Stderr, "hi\n")'
-  golf -le 'Print("The time is ", time.Now())'
+  golf -gle 'Print("The time is ", time.Now())'
 
   # cat -n (see more about "line mode" below)
   golf -n -e 'fmt.Printf("%6d  %s", LineNum, Line)' MYFILE
@@ -41,7 +41,7 @@ Try these on your command line.
   # the convenient Field accessor (supports 1-based and negative indexes).
   ps aux | golf -ale 'Print(Field(5))'
 
-  # Prints "and".
+  # Prints "and". Could also say "Field(-2)".
   echo "tom, dick, and harry" | golf -ape 'Line = Field(3)'
 
   # Input field separation uses strings.Fields by default.
@@ -64,7 +64,7 @@ golf mimics perl's flags, but not perfectly so.
 You can cluster one-letter flags, so -lane means the same as
 -l -a -n -e as it does in perl.
 
-The -b and -E flags act as a replacement for awk and Perl's BEGIN and END blocks.
+The -b and -E flags act as replacements for awk and Perl's BEGIN and END blocks.
 They are inserted before and after the -e snippet and only run once each.
 
 Line mode
@@ -89,18 +89,46 @@ even say:
 
   golf -pe '' FILE1 FILE2 FILE3
 
+In-place mode
+
+-i causes edits to happen in-place: each input file is opened, unlinked, and
+the default output (Print, Printf) is sent to a new file with the original's
+name.
+
+-I does the same, but keeps a backup of the original, according to the same
+renaming rules that perl -i uses:
+
+  - if the replacement contains no "*", it is used as a literal suffix.
+  - otherwise, each occurrence of * is replaced with the original filename.
+
+Like perl, we do not support crossing filesystem boundaries in backups, nor
+do we create directories.
+
+Unlike perl, in-place backup uses the -I flag, not the -i flag with an argument.
+Go's standard flag library does not support optional flags. So these don't act
+the same:
+
+  perl -ib FILE1 FILE2  # Runs the perl program in FILE1 with backup to FILE2.
+  golf -ib WORD FILE    # Runs WORD in BEGIN stage, FILE will end up truncated.
+
+No script mode
+
+golf does not support a script mode (e.g., "golf FILE", or files with #!golf).
+
+If you are writing a Go program in an editor, just go run it. If looking for
+convenience, see if package Prelude contains anything useful.
 */
 package main
 
 import (
 	"bytes"
-	_ "embed"
 	"flag"
 	"fmt"
 	"go/format"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -108,59 +136,64 @@ import (
 )
 
 var (
-	rawSrc   = flag.String("e", "", "one-liner code")
-	flgN     = flag.Bool("n", false, "line mode")
-	flgL     = flag.Bool("l", false, "automate line-end processing. Trim input newline and add it back on -p")
-	flgP     = flag.Bool("p", false, "pipe mode. Implies -n and prints Line after each iteration")
-	flgG     = flag.Bool("g", false, "skip goimports")
-	flgA     = flag.Bool("a", false, "autosplit Line to Fields. Implies -n")
-	flgF     = flag.String("F", " ", "field separator. Implies -a and -n. See docs for GSplit.")
-	flgKeep  = flag.Bool("k", false, "keep tempdir, for debugging")
-	beginSrc = flag.String("b", "", "code block to insert before record processing")
-	endSrc   = flag.String("E", "", "code block to insert after record processing")
-	warnings = flag.Bool("w", false, "print warnings on access to undefined fields and so on")
-	modules  []string
+	rawSrc     = flag.String("e", "", "one-liner code")
+	flgN       = flag.Bool("n", false, "line mode")
+	flgL       = flag.Bool("l", false, "automate line-end processing. Trim input newline and add it back on -p")
+	flgP       = flag.Bool("p", false, "pipe mode. Implies -n and prints Line after each iteration")
+	flgG       = flag.Bool("g", false, "run goimports")
+	flgA       = flag.Bool("a", false, "autosplit Line to Fields. Implies -n")
+	flgF       = flag.String("F", " ", "field separator. Implies -a and -n. See docs for GSplit")
+	inplace    = flag.Bool("i", false, "in-place edit mode. See package doc for in-place edit")
+	inplaceBak = flag.String("I", "", "in-place edit mode, with backup. See package doc for in-place edit")
+	flgKeep    = flag.Bool("k", false, "keep tempdir, for debugging")
+	beginSrc   = flag.String("b", "", "code block to insert before record processing")
+	endSrc     = flag.String("E", "", "code block to insert after record processing")
+	warnings   = flag.Bool("w", false, "print warnings on access to undefined fields and so on")
+	goVer      = flag.String("goVer", "1.17", "go version to declare in go.mod file")
+	help       = flag.Bool("help", false, "print usage help and exit")
+	modules    []string
+
+	longFlags      = map[string]bool{}
+	shortBoolFlags = map[string]bool{}
 )
 
 func init() {
+	flag.BoolVar(help, "h", false, "print usage help and exit")
 	flag.Func("M", "modules to import. May be repeated, or separate with commas", func(s string) error {
 		modules = append(modules, strings.Split(s, ",")...)
 		return nil
+	})
+	flag.CommandLine.VisitAll(func(f *flag.Flag) {
+		if len(f.Name) > 1 {
+			longFlags[f.Name] = true
+		} else {
+			if fv, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && fv.IsBoolFlag() {
+				shortBoolFlags[f.Name] = true
+			}
+		}
 	})
 }
 
 var errGolf = fmt.Errorf("golf returned nonzero status")
 
 type Prog struct {
-	RawArgs   []string
-	BeginSrc  string
-	RawSrc    string
-	EndSrc    string
-	Src       string
-	Imports   []string
-	FlgN      bool
-	FlgP      bool
-	FlgL      bool
-	FlgA      bool
-	FlgF      string
-	Warnings  bool
-	Goimports bool
-	Keep      bool
-	Prelude   []byte
-}
-
-//go:embed prelude/prelude.go
-var golflibsrc []byte
-
-func preludeSrc() []byte {
-	start, end := bytes.Index(golflibsrc, []byte("// golf:prelude start\n")), bytes.Index(golflibsrc, []byte("// golf:prelude end\n"))
-	if start < 0 {
-		prelude.Die("prelude.go missing start marker")
-	}
-	if end < 0 {
-		return golflibsrc[start:]
-	}
-	return golflibsrc[start:end]
+	RawArgs    []string
+	BeginSrc   string
+	RawSrc     string
+	EndSrc     string
+	Src        string
+	Imports    []string
+	FlgN       bool
+	FlgP       bool
+	FlgL       bool
+	FlgA       bool
+	FlgF       string
+	InPlace    bool
+	InPlaceBak string
+	Warnings   bool
+	Goimports  bool
+	Keep       bool
+	Prelude    []byte
 }
 
 var program = template.Must(template.New("program").Parse(`
@@ -177,9 +210,9 @@ import (
 func init() {
 	IFS = {{ printf "%q" .FlgF }}
 	Warnings = {{ .Warnings }}
-	{{ if .FlgL }}
-	Print = fmt.Println
-	{{- end }}
+	GolfFlgL = {{ .FlgL }}
+	GolfInPlace = {{ .InPlace }}
+	GolfInPlaceBak = {{ printf "%q" .InPlaceBak }}
 }
 
 func main() {
@@ -187,37 +220,71 @@ func main() {
 	{{.BeginSrc}}
 	// User -b end
 	{{- if .FlgN}}
-	const _golf_p = {{.FlgP}}
-	var _golf_p_dirty = false
-	_golf_flush_p := func() {
-		if _golf_p_dirty {
+	const _golfP = {{.FlgP}}
+	var _golfPDirty = false
+	_golfFlushP := func() {
+		if _golfPDirty {
 			Print(Line)
-			_golf_p_dirty = false
+			_golfPDirty = false
 		}
 	}
-	_golf_filenames := os.Args[1:]
-	if len(_golf_filenames)==0 {
-		_golf_filenames=[]string{"/dev/stdin"}
+	_golfCloseOut := func() {
+		if CurOut == os.Stdout {
+			return
+		}
+		if err := CurOut.Close(); err != nil {
+			Warn("golf: can't close current output: %v", err)
+		}
+		CurOut = os.Stdout
+	}
+
+	_golfFilenames := os.Args[1:]
+	if len(_golfFilenames)==0 {
+		_golfFilenames=[]string{"/dev/stdin"}
+		GolfInPlace = false
+		GolfInPlaceBak = ""
 	}
 File:
-    for _, Filename = range _golf_filenames {
-		_golf_flush_p()
-		_golf_file, err := os.Open(Filename)
+    for _, Filename = range _golfFilenames {
+		_golfFlushP()
+		_golfCloseOut()
+		_golfFile, err := os.Open(Filename)
 		if err != nil {
 			Die(err)
 		}
+		// NOTE: assumes POSIX fs semantics: a file can be renamed or deleted
+		// after being opened.
+		if GolfInPlace {
+			if GolfInPlaceBak == "" {
+				// In the no-backup case, we still need to unlink the input
+				// before os.Create, because otherwise the input will be
+				// truncated before we read it.
+				if err := os.Remove(Filename); err !=nil {
+					Die("golf: can't remove input file: %v", err)
+				}
+			} else {
+				bakname := BackupName(Filename, GolfInPlaceBak)
+				if os.Rename(Filename, bakname); err != nil {
+					Die("golf: in-place backup: %v", err)
+				}
+			}
+
+			if CurOut, err = os.Create(Filename); err != nil {
+				Die("golf: can't create output: %v", err)
+			}
+		}
 		LineNum = 0
-		_golf_scanner := bufio.NewScanner(_golf_file)
+		_golfScanner := bufio.NewScanner(_golfFile)
 	Line:
-		for _golf_scanner.Scan() {
-			_golf_flush_p()
+		for _golfScanner.Scan() {
+			_golfFlushP()
 			LineNum++  // 1-based. Be compatible with awk, perl's default.
 			// Scanned line.
 			// BUG: restores newlines crudely in non-line mode.
 			// Should have \r when they were present in input, and should not
 			// insert a trailing newline on the last line if it was absent.
-			Line = _golf_scanner.Text() {{- if not .FlgL}} + "\n"{{end}}
-			_golf_p_dirty = {{ .FlgP }}
+			Line = _golfScanner.Text() {{- if not .FlgL}} + "\n"{{end}}
+			_golfPDirty = {{ .FlgP }}
 			{{if .FlgA}}
 			Fields = GSplit(IFS, Line)
 			{{- end}}
@@ -228,12 +295,13 @@ File:
 			{{- if .FlgN}}
 			continue Line
 		}
-		if err := _golf_scanner.Err(); err != nil {
+		if err := _golfScanner.Err(); err != nil {
 			Die("%s: %v", Filename, err)
 		}
 		continue File
 	}
-	_golf_flush_p()
+	_golfFlushP()
+	_golfCloseOut()
 	{{- end}}
 	// User -E start
 	{{.EndSrc}}
@@ -246,16 +314,17 @@ func (p *Prog) transform() error {
 	if err := program.Execute(s, p); err != nil {
 		return err
 	}
-	// Try to pretty it up, but stay silent about errors. The real compiler will give a better error message later.
+	// Try to pretty it up, but stay silent about errors. The real compiler
+	// will give a better error message later.
 	if src, err := format.Source(s.Bytes()); err != nil {
 		p.Src = s.String()
 	} else {
 		p.Src = string(src)
 	}
-
 	return nil
 }
 
+// do runs the command with stdio connected.
 func do(c string, args []string) error {
 	cmd := exec.Command(c, args...)
 	cmd.Stdin = os.Stdin
@@ -286,48 +355,108 @@ func doQ(c string, args []string) error {
 func (p *Prog) run() int {
 	tmpdir, err := os.MkdirTemp("", "golf-")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "mkdir tmp: %v\n", err)
+		prelude.Warn("golf: mkdir tmp: %v\n", err)
 		return 1
 	}
+	if tmpdir, err = filepath.Abs(tmpdir); err != nil { // note =, not :=
+		prelude.Warn("golf: abs tmp: %v\n", err)
+		return 1
+	}
+
 	if p.Keep {
 		fmt.Fprintln(os.Stderr, tmpdir)
 	} else {
 		defer func() {
 			if err := os.RemoveAll(tmpdir); err != nil {
-				fmt.Fprintf(os.Stderr, "rmall tmp: %v\n", err)
+				prelude.Warn("golf: rmall tmp: %v\n", err)
 				// but don't fail the golf.
 			}
 		}()
 	}
 
+	origdir, err := os.Getwd()
+	if err != nil {
+		prelude.Warn("golf: original dir: %v\n", err)
+		return 1
+	}
+
 	if err := os.Chdir(tmpdir); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		prelude.Warn("golf: %v", err)
 		return 1
 	}
 
 	tmpfile := filepath.Join(tmpdir, "golfe.go")
 	if err := os.WriteFile(tmpfile, []byte(p.Src), 0666); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		prelude.Warn("golf: %v", err)
 		return 1
 	}
 
 	if p.Goimports {
+		prelude.Warn(">>goimports")
 		if err := doQ("goimports", []string{"-w", "."}); err != nil {
-			fmt.Fprintf(os.Stderr, "golf: goimports: %v\n", err)
+			prelude.Warn("golf: goimports: %v\n", err)
 			return 1
 		}
 	}
 
-	if err := doQ("go", []string{"mod", "init", "example.com/golf"}); err != nil {
-		fmt.Fprintf(os.Stderr, "golf: mod init: %v\n", err)
+	needTidy := false
+	for _, v := range p.Imports {
+		if strings.Contains(v, "/") {
+			needTidy = true
+			break
+		}
+	}
+
+	if needTidy {
+		if err := doQ("go", []string{"mod", "init", "example.com/golf"}); err != nil {
+			fmt.Fprintf(os.Stderr, "golf: mod init: %v\n", err)
+			return 1
+		}
+		if err := doQ("go", []string{"mod", "tidy"}); err != nil {
+			fmt.Fprintf(os.Stderr, "golf: mod tidy: %v\n", err)
+			return 1
+		}
+	} else {
+		// Write it ourselves, which is faster.
+		tidy := fmt.Sprintf("module example.com/golf\n\ngo %s\n", *goVer)
+		if err := os.WriteFile("go.mod", []byte(tidy), 0666); err != nil {
+			fmt.Fprintf(os.Stderr, "golf: writing mod file: %v\n", err)
+		}
+	}
+
+	/* y u no faster?
+	if err := do("go", []string{"tool", "compile", "golfe.go"}); err != nil {
+		prelude.Warn("compile: %v", err)
 		return 1
 	}
-	if err := doQ("go", []string{"mod", "tidy"}); err != nil {
-		fmt.Fprintf(os.Stderr, "golf: mod tidy: %v\n", err)
+	if err := do("go", []string{"tool", "link", "golfe.o"}); err != nil {
+		prelude.Warn("link: %v", err)
 		return 1
 	}
-	if err := do("go", append([]string{"run", "."}, p.RawArgs...)); err != nil {
-		// if err != errGolf {			fmt.Fprintf(os.Stderr, "golf: %v\n", err)		}
+	if err := do("./a.out", p.RawArgs); err != nil {
+		prelude.Warn("run: %v", err)
+		return 1
+	}
+	*/
+
+	const binname = "golfing" // should this add .exe on win32?
+
+	if err := do("go", []string{"build", "-o", binname, "."}); err != nil {
+		if err != errGolf {
+			prelude.Warn("golf: %v", err)
+		}
+		return 1
+	}
+
+	if err := os.Chdir(origdir); err != nil {
+		prelude.Warn("golf: returning to original dir: %v", err)
+		return 1
+	}
+
+	if err := do(filepath.Join(tmpdir, binname), p.RawArgs); err != nil {
+		if err != errGolf {
+			prelude.Warn("golf: %v", err)
+		}
 		return 1
 	}
 
@@ -337,9 +466,8 @@ func (p *Prog) run() int {
 func decluster() {
 	res := []string{os.Args[0]}
 	for i, v := range os.Args[1:] {
-		if v[0] != '-' {
-			// Skip a non-flag argument.
-			// If we add long flags we'll need to match and skip them here too.
+		if v[0] != '-' || longFlags[v[1:]] {
+			// Skip a non-flag arguments and known long flags.
 			res = append(res, v)
 			continue
 		}
@@ -347,18 +475,58 @@ func decluster() {
 			res = append(res, os.Args[i:]...)
 			break
 		}
-		for _, vv := range strings.Split(v[1:], "") {
+		for i, vv := range strings.Split(v[1:], "") {
+			if i < (len(v)-2) && !shortBoolFlags[vv] {
+				// This doesn't protect against -ib, unfortunately.
+				// (Our version of -i does not take an arg.)
+				prelude.Warn("-%s cannot be used inside a flag cluster", vv)
+				flag.PrintDefaults()
+				os.Exit(1)
+			}
 			res = append(res, "-"+vv)
 		}
 	}
 	os.Args = res
 }
 
+func dedupe(s []string) []string {
+	sort.Strings(s)
+	w := 0
+	for r, cur := range s {
+		if r > 0 && cur == s[r-1] {
+			continue
+		}
+		s[w] = cur
+		w++
+	}
+	return s[:w]
+}
+
+const helpString = `Command golf provides some Go one-liner fun.
+
+Invoke it with a snippet of Go code in the -e flag, which will be compiled
+and run for you.
+
+  golf -e 'for _, v := range []string{"hi", "bye"} { fmt.Println(v) }'
+
+Additional flags such as -n turn on awk/perl-like line mode, which are useful
+in processing text data. See the examples and more in the Godoc for
+github.com/gaal/golf.
+
+`
+
 func main() {
 	// The standard Go flag package does not support flag clustering.
 	// This is too convenient to give up when golfing, so handle it ourselves.
 	decluster()
 	flag.Parse()
+
+	if *help {
+		// TODO: intentional -h output belongs on stdout.
+		prelude.Warn(helpString)
+		flag.PrintDefaults()
+		os.Exit(0)
+	}
 
 	// -F implies -a (which in turn implies -n...)
 	flag.Visit(func(f *flag.Flag) {
@@ -367,24 +535,41 @@ func main() {
 		}
 	})
 
+	// Both -a and -n imply -n.
+	*flgN = *flgN || *flgP || *flgA
+
+	// -I implies -i.
+	*inplace = *inplace || len(*inplaceBak) > 0
+
+	imps := []string{"io", "os", "regexp", "strconv", "strings", "fmt"}
+	if *flgN {
+		imps = append(imps, "bufio")
+	}
+	if len(modules) > 0 {
+		imps = append(imps, modules...)
+	}
+	imps = dedupe(imps)
+
 	p := &Prog{
-		BeginSrc:  *beginSrc,
-		RawSrc:    *rawSrc,
-		EndSrc:    *endSrc,
-		RawArgs:   flag.Args(),
-		Imports:   []string{"bufio", "os", "regexp", "strings", "fmt"},
-		FlgN:      *flgN || *flgP || *flgA,
-		FlgP:      *flgP,
-		FlgL:      *flgL,
-		FlgA:      *flgA,
-		FlgF:      *flgF,
-		Warnings:  *warnings,
-		Goimports: !*flgG,
-		Keep:      *flgKeep,
-		Prelude:   preludeSrc(),
+		BeginSrc:   *beginSrc,
+		RawSrc:     *rawSrc,
+		EndSrc:     *endSrc,
+		RawArgs:    flag.Args(),
+		Imports:    imps,
+		FlgN:       *flgN,
+		FlgP:       *flgP,
+		FlgL:       *flgL,
+		FlgA:       *flgA,
+		FlgF:       *flgF,
+		InPlace:    *inplace,
+		InPlaceBak: *inplaceBak,
+		Warnings:   *warnings,
+		Goimports:  *flgG,
+		Keep:       *flgKeep,
+		Prelude:    prelude.Source(),
 	}
 	if err := p.transform(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		prelude.Warn("golf: %v", err)
 		os.Exit(1)
 	}
 	os.Exit(p.run())

@@ -1,11 +1,15 @@
 // Package prelude provides convenient functionality for Go one-liners.
 //
-// Most of its source code is embedded directly in the generated source as a Prelude.
+// Most of its source code is embedded directly in the generated source as a
+// Prelude.
 // It is however also used for godoc, and can be used by the golf command.
 package prelude
 
 import (
+	"bytes"
+	_ "embed"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
@@ -13,17 +17,33 @@ import (
 )
 
 // Code between these comments is embedded in the golf binary.
+// Why do we inline the Prelude source inside the generated golf program
+// instead of "import ."-ing it? Because this way, we don't have to worry
+// about where the prelude package is installed, modules, and so on.
+// The effect on program size or build times is negligible either way.
+
 // golf:prelude start
 
 var (
-	Filename string   // Current filename
-	LineNum  int      // Current line number (1-based)
-	Line     string   // Current line
-	Fields   []string // Split field slice. See the convenience Field accessor.
+	// Updated automatically in -n mode.
+	Filename string // Current filename
+	LineNum  int    // Current line number (1-based)
+	Line     string // Current line
+
+	// Updated automatically in -a mode.
+	Fields []string // Split field slice. See the convenience Field accessor.
 
 	IFS      = " "   // Input field separator. Overridden by -F.
 	OFS      = " "   // Output field separator
 	Warnings = false // Whether to print warnings. Overridden by -w.
+	GolfFlgL = false // Whether to stip/add newlines on I/O. Overridden by -l.
+
+	// -i settings. Note that -i without argument is allowed, it means no backup.
+	GolfInPlace    = false
+	GolfInPlaceBak string
+
+	// Default writer for Print and Printf. Overridden to each Filename in -i.
+	CurOut io.WriteCloser = os.Stdout
 )
 
 var (
@@ -32,13 +52,37 @@ var (
 
 	// RE is an alias for regexp.MustCompile.
 	RE = regexp.MustCompile
-
-	// Print forwards fmt.Print (or fmt.Println, when -l is specified).
-	//
-	// Unlike Perl's print builtin, it does not default to printing
-	// the implicit Line variable when no arguments are provided.
-	Print = fmt.Print
 )
+
+// Print prints a string to CurOut.
+//
+// With no arguments, the string to be printed defaults to Line.
+//
+// In -l mode, a newline is appended to the string.
+//
+// In -i mode, the "current output" is the replacement for the current
+// Filename. Otherwise, it is os.Stdout.
+func Print(xs ...interface{}) {
+	if len(xs) == 0 {
+		xs = append(xs, Line)
+	}
+	if GolfFlgL {
+		fmt.Fprintln(CurOut, xs...)
+	} else {
+		fmt.Fprint(CurOut, xs...)
+	}
+}
+
+// Printf prints a string to CurOut.
+//
+// In -i mode, the "current output" is the replacement for the current
+// Filename. Otherwise, it is os.Stdout.
+//
+// Newline is not added automatically, even in -l mode, nor is Line used
+// as a default string.
+func Printf(format string, xs ...interface{}) {
+	fmt.Fprintf(CurOut, format, xs...)
+}
 
 // GAtoi calls strconv.Atoi on s, and issues an optional warning
 // if that returned an error.
@@ -98,7 +142,7 @@ func GSplit(sep, input string) []string {
 	if len(sep) > 1 && sep[0] == '/' && sep[len(sep)-1] == '/' {
 		// Sure, we could memoize regexp compilation.
 		if re, err := regexp.Compile(sep[1 : len(sep)-1]); err != nil {
-			Die("Invalid Split regexp separator (check -F flag): %v", err)
+			Die("Invalid GSplit regexp separator (check -F flag): %v", err)
 		} else {
 			return re.Split(input, -1)
 		}
@@ -129,4 +173,34 @@ func Field(n int) string {
 	return Fields[n]
 }
 
+// BackupName returns the filename used as a backup in in-place edit mode.
+//
+// Replacement rules follow Perl -i:
+//   - if ext contains no '*' characters, it is appended to orig as a suffix.
+//   - otherwise, each * is replaced with orig.
+func BackupName(orig, ext string) string {
+	if strings.Contains(ext, "*") {
+		return strings.ReplaceAll(ext, "*", orig)
+	}
+	return orig + ext
+}
+
 // golf:prelude end
+
+//go:embed prelude.go
+var golflibsrc []byte
+
+// Source returns the source code of the prelude.
+func Source() []byte {
+	var (
+		start = bytes.Index(golflibsrc, []byte("// golf:prelude start\n"))
+		end   = bytes.Index(golflibsrc, []byte("// golf:prelude end\n"))
+	)
+	if start < 0 {
+		Die("prelude.go missing start marker")
+	}
+	if end < 0 {
+		return golflibsrc[start:]
+	}
+	return golflibsrc[start:end]
+}
