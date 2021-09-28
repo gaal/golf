@@ -139,9 +139,9 @@ import (
 )
 
 var (
-	rawSrc     = StringList("e", nil, "one-liner code")
-	beginSrc   = StringList("b", nil, "code block(s) to insert before record processing")
-	endSrc     = StringList("E", nil, "code block(s) to insert after record processing")
+	rawSrc     = stringList("e", nil, "one-liner code")
+	beginSrc   = stringList("b", nil, "code block(s) to insert before record processing")
+	endSrc     = stringList("E", nil, "code block(s) to insert after record processing")
 	flgN       = flag.Bool("n", false, "line mode")
 	flgL       = flag.Bool("l", false, "automate line-end processing. Trims input newline and adds it back on -p")
 	flgP       = flag.Bool("p", false, "pipe mode. Implies -n and prints Line after each iteration")
@@ -154,7 +154,7 @@ var (
 	warnings   = flag.Bool("w", false, "print warnings on access to undefined fields and so on")
 	goVer      = flag.String("goVer", "1.17", "go version to declare in go.mod file")
 	help       = flag.Bool("h", false, "print usage help and exit")
-	modules    = StringList("M", nil, "modules to import. May be repeated")
+	modules    = stringList("M", nil, "modules to import. May be repeated")
 
 	longFlags      = map[string]bool{}
 	shortBoolFlags = map[string]bool{}
@@ -189,7 +189,9 @@ func (v *stringListValue) String() string {
 	return fmt.Sprintf("%q", []string(*v))
 }
 
-func StringList(name string, value stringListValue, usage string) *stringListValue {
+// stringList returns a string slice bound to a flag.
+// Repeated appearances of the flag on the command-line append to the slice.
+func stringList(name string, value stringListValue, usage string) *stringListValue {
 	p := new(stringListValue)
 	flag.Var(p, name, usage)
 	return p
@@ -197,7 +199,8 @@ func StringList(name string, value stringListValue, usage string) *stringListVal
 
 var errGolf = fmt.Errorf("golf returned nonzero status")
 
-type Prog struct {
+// prog collects the parameters of our one-liner program.
+type prog struct {
 	RawArgs    []string
 	BeginSrc   []string
 	RawSrc     []string
@@ -336,7 +339,7 @@ File:
 }
 `))
 
-func (p *Prog) transform() error {
+func (p *prog) transform() error {
 	s := &bytes.Buffer{}
 	if err := program.Execute(s, p); err != nil {
 		return err
@@ -380,7 +383,7 @@ func doQ(c string, args []string) error {
 	return nil
 }
 
-func (p *Prog) run() int {
+func (p *prog) run() int {
 	tmpdir, err := os.MkdirTemp("", "golf-")
 	if err != nil {
 		prelude.Warn("golf: mkdir tmp: %v\n", err)
@@ -577,7 +580,7 @@ func main() {
 	}
 	imps = dedupe(imps)
 
-	p := &Prog{
+	p := &prog{
 		BeginSrc:   *beginSrc,
 		RawSrc:     *rawSrc,
 		EndSrc:     *endSrc,
