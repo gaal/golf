@@ -121,21 +121,21 @@ func Die(xs ...interface{}) {
 // Warn prints an error to stderr.
 //
 // If no arguments are supplied, a generic message is printed.
-// If the first argument is a string, it is taken as a format string.
+// If multiple arguments are provided and the first one is a string,
+// it is taken as a format string.
 // Otherwise everything is printed using default fmt formatting.
 func Warn(xs ...interface{}) {
 	if len(xs) == 0 {
 		xs = []interface{}{"Something went wrong while golfing\n"}
 	}
-	switch x := xs[0].(type) {
-	case string:
-		if !strings.HasSuffix(x, "\n") {
-			x = x + "\n"
+	if s, ok := xs[0].(string); ok && len(xs) > 1 {
+		if !strings.HasSuffix(s, "\n") {
+			s = s + "\n"
 		}
-		fmt.Fprintf(os.Stderr, x, xs[1:]...)
-	default:
-		fmt.Fprintln(os.Stderr, xs...)
+		fmt.Fprintf(os.Stderr, s, xs[1:]...)
+		return
 	}
+	fmt.Fprintln(os.Stderr, xs...)
 }
 
 // GSplit splits an input string, with some golf affordances.
