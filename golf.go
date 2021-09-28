@@ -30,7 +30,7 @@ Try these on your command line.
   # cat -n (see more about "line mode" below)
   golf -n -e 'fmt.Printf("%6d  %s", LineNum, Line)' MYFILE
 
-  # Use builtin Die function (takes raw error or fmtstring+args)
+  # Use prelude Die function (takes raw error or fmtstring+args)
   golf -l -e 'if data, err := os.ReadFile("MYFILE"); err != nil { Die(err) }; Print(len(data))'
 
   # head MYFILE
@@ -139,9 +139,11 @@ import (
 )
 
 var (
-	rawSrc     = flag.String("e", "", "one-liner code")
+	rawSrc     = StringList("e", nil, "one-liner code")
+	beginSrc   = StringList("b", nil, "code block(s) to insert before record processing")
+	endSrc     = StringList("E", nil, "code block(s) to insert after record processing")
 	flgN       = flag.Bool("n", false, "line mode")
-	flgL       = flag.Bool("l", false, "automate line-end processing. Trim input newline and add it back on -p")
+	flgL       = flag.Bool("l", false, "automate line-end processing. Trims input newline and adds it back on -p")
 	flgP       = flag.Bool("p", false, "pipe mode. Implies -n and prints Line after each iteration")
 	flgG       = flag.Bool("g", false, "run goimports")
 	flgA       = flag.Bool("a", false, "autosplit Line to Fields. Implies -n")
@@ -151,23 +153,20 @@ var (
 	flgKeep    = flag.Bool("k", false, "keep tempdir, for debugging")
 	warnings   = flag.Bool("w", false, "print warnings on access to undefined fields and so on")
 	goVer      = flag.String("goVer", "1.17", "go version to declare in go.mod file")
-	help       = flag.Bool("help", false, "print usage help and exit")
-	modules    stringsValue
-	beginSrc   stringsValue
-	endSrc     stringsValue
+	help       = flag.Bool("h", false, "print usage help and exit")
+	modules    = StringList("M", nil, "modules to import. May be repeated")
 
 	longFlags      = map[string]bool{}
 	shortBoolFlags = map[string]bool{}
 )
 
 func init() {
-	flag.BoolVar(help, "h", false, "print usage help and exit") // alias
-	flag.Var(&modules, "M", "modules to import. May be repeated")
-	flag.Var(&beginSrc, "b", "code block(s) to insert before record processing")
-	flag.Var(&beginSrc, "BEGIN", "code block(s) to insert before record processing") // alias
-	flag.Var(&endSrc, "E", "code block(s) to insert after record processing")        //alias
-	flag.Var(&endSrc, "END", "code block(s) to insert after record processing")      //alias
+	// Some flags get long aliases.
+	flag.BoolVar(help, "help", false, "print usage help and exit")
+	flag.Var(beginSrc, "BEGIN", "code block(s) to insert before record processing")
+	flag.Var(endSrc, "END", "code block(s) to insert after record processing")
 
+	// Study declared flags so we can decluster e.g. -lane later.
 	flag.CommandLine.VisitAll(func(f *flag.Flag) {
 		if len(f.Name) > 1 {
 			longFlags[f.Name] = true
@@ -179,15 +178,21 @@ func init() {
 	})
 }
 
-type stringsValue []string
+type stringListValue []string
 
-func (v *stringsValue) Set(s string) error {
+func (v *stringListValue) Set(s string) error {
 	*v = append(*v, s)
 	return nil
 }
 
-func (v *stringsValue) String() string {
+func (v *stringListValue) String() string {
 	return fmt.Sprintf("%q", []string(*v))
+}
+
+func StringList(name string, value stringListValue, usage string) *stringListValue {
+	p := new(stringListValue)
+	flag.Var(p, name, usage)
+	return p
 }
 
 var errGolf = fmt.Errorf("golf returned nonzero status")
@@ -195,7 +200,7 @@ var errGolf = fmt.Errorf("golf returned nonzero status")
 type Prog struct {
 	RawArgs    []string
 	BeginSrc   []string
-	RawSrc     string
+	RawSrc     []string
 	EndSrc     []string
 	Src        string
 	Imports    []string
@@ -212,7 +217,7 @@ type Prog struct {
 	Prelude    []byte
 }
 
-var program = template.Must(template.New("program").Parse(`
+var program = template.Must(template.New("program").Parse(`// Program golfing is a one-liner wrapped by golf.
 package main
 
 import (
@@ -232,11 +237,11 @@ func init() {
 }
 
 func main() {
-	// User -b start
+	// User -BEGIN start
 	{{- range .BeginSrc}}
 	{{.}}
 	{{- end }}
-	// User -b end
+	// User -BEGIN end
 	{{- if .FlgN}}
 	const _golfP = {{.FlgP}}
 	var _golfPDirty = false
@@ -271,7 +276,7 @@ File:
 			Die(err)
 		}
 		// NOTE: assumes POSIX fs semantics: a file can be renamed or deleted
-		// after being opened.
+		// after being opened. This will probably fail on Windows.
 		if GolfInPlace {
 			if GolfInPlaceBak == "" {
 				// In the no-backup case, we still need to unlink the input
@@ -308,7 +313,9 @@ File:
 			{{- end}}
 			{{- end}}
 			// User -e start
-			{{.RawSrc}}
+			{{- range .RawSrc}}
+			{{.}}
+			{{- end}}
 			// User -e end
 			{{- if .FlgN}}
 			continue Line
@@ -321,11 +328,11 @@ File:
 	_golfFlushP()
 	_golfCloseOut()
 	{{- end}}
-	// User -E start
+	// User -END start
 	{{- range .EndSrc}}
 	{{.}}
 	{{- end }}
-	// User -E end
+	// User -END end
 }
 `))
 
@@ -407,13 +414,12 @@ func (p *Prog) run() int {
 	}
 
 	tmpfile := filepath.Join(tmpdir, "golfe.go")
-	if err := os.WriteFile(tmpfile, []byte(p.Src), 0666); err != nil {
+	if err := os.WriteFile(tmpfile, []byte(p.Src), 0640); err != nil {
 		prelude.Warn("golf: %v", err)
 		return 1
 	}
 
 	if p.Goimports {
-		prelude.Warn(">>goimports")
 		if err := doQ("goimports", []string{"-w", "."}); err != nil {
 			prelude.Warn("golf: goimports: %v\n", err)
 			return 1
@@ -440,7 +446,7 @@ func (p *Prog) run() int {
 	} else {
 		// Write it ourselves, which is faster.
 		tidy := fmt.Sprintf("module example.com/golf\n\ngo %s\n", *goVer)
-		if err := os.WriteFile("go.mod", []byte(tidy), 0666); err != nil {
+		if err := os.WriteFile("go.mod", []byte(tidy), 0640); err != nil {
 			fmt.Fprintf(os.Stderr, "golf: writing mod file: %v\n", err)
 		}
 	}
@@ -556,7 +562,7 @@ func main() {
 		}
 	})
 
-	// Both -a and -n imply -n.
+	// Both -a and -p imply -n.
 	*flgN = *flgN || *flgP || *flgA
 
 	// -I implies -i.
@@ -566,15 +572,15 @@ func main() {
 	if *flgN {
 		imps = append(imps, "bufio")
 	}
-	if len(modules) > 0 {
-		imps = append(imps, modules...)
+	if len(*modules) > 0 {
+		imps = append(imps, *modules...)
 	}
 	imps = dedupe(imps)
 
 	p := &Prog{
-		BeginSrc:   beginSrc,
+		BeginSrc:   *beginSrc,
 		RawSrc:     *rawSrc,
-		EndSrc:     endSrc,
+		EndSrc:     *endSrc,
 		RawArgs:    flag.Args(),
 		Imports:    imps,
 		FlgN:       *flgN,
