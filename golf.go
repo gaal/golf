@@ -20,7 +20,7 @@ Try these on your command line.
 
   # Explicitly import additional packages (don't have to be from the stdlib)
   # with the -M flag, which may be repeated.
-  golf -M fmt,math -e 'fmt.Println(math.Pi)'
+  golf -M fmt -M math -e 'fmt.Println(math.Pi)'
 
   # Some standard library packages are imported automatically.
   # goimports can run for you with -g, so -M is often not needed.
@@ -55,7 +55,7 @@ Try these on your command line.
   golf -F '/\t/' -ple 'for i, v := range Fields { Fields[i] = strconv.Quote(v) }; Line = Join(Fields, ",")'
 
   # sum sizes. Note -b and E replace awk/perl BEGIN and END blocks.
-  ls -l | golf -alb 'sum := 0' -e 'sum += GAtoi(Field(5))' -E 'Print(sum)'s
+  ls -l | golf -alb 'sum := 0' -e 'sum += GAtoi(Field(5))' -E 'Print(sum)'
 
 Flags
 
@@ -65,7 +65,10 @@ You can cluster one-letter flags, so -lane means the same as
 -l -a -n -e as it does in perl.
 
 The -b and -E flags act as replacements for awk and Perl's BEGIN and END blocks.
-They are inserted before and after the -e snippet and only run once each.
+They are inserted before and after the -e snippet and only run once each. They
+are inserted in the same scope as the -e script, so variables declared in BEGIN
+are available for later blocks. -BEGIN and -END are aliases for -b and -E
+respectively.
 
 Line mode
 
@@ -146,23 +149,25 @@ var (
 	inplace    = flag.Bool("i", false, "in-place edit mode. See package doc for in-place edit")
 	inplaceBak = flag.String("I", "", "in-place edit mode, with backup. See package doc for in-place edit")
 	flgKeep    = flag.Bool("k", false, "keep tempdir, for debugging")
-	beginSrc   = flag.String("b", "", "code block to insert before record processing")
-	endSrc     = flag.String("E", "", "code block to insert after record processing")
 	warnings   = flag.Bool("w", false, "print warnings on access to undefined fields and so on")
 	goVer      = flag.String("goVer", "1.17", "go version to declare in go.mod file")
 	help       = flag.Bool("help", false, "print usage help and exit")
-	modules    []string
+	modules    stringsValue
+	beginSrc   stringsValue
+	endSrc     stringsValue
 
 	longFlags      = map[string]bool{}
 	shortBoolFlags = map[string]bool{}
 )
 
 func init() {
-	flag.BoolVar(help, "h", false, "print usage help and exit")
-	flag.Func("M", "modules to import. May be repeated, or separate with commas", func(s string) error {
-		modules = append(modules, strings.Split(s, ",")...)
-		return nil
-	})
+	flag.BoolVar(help, "h", false, "print usage help and exit") // alias
+	flag.Var(&modules, "M", "modules to import. May be repeated")
+	flag.Var(&beginSrc, "b", "code block(s) to insert before record processing")
+	flag.Var(&beginSrc, "BEGIN", "code block(s) to insert before record processing") // alias
+	flag.Var(&endSrc, "E", "code block(s) to insert after record processing")        //alias
+	flag.Var(&endSrc, "END", "code block(s) to insert after record processing")      //alias
+
 	flag.CommandLine.VisitAll(func(f *flag.Flag) {
 		if len(f.Name) > 1 {
 			longFlags[f.Name] = true
@@ -174,13 +179,24 @@ func init() {
 	})
 }
 
+type stringsValue []string
+
+func (v *stringsValue) Set(s string) error {
+	*v = append(*v, s)
+	return nil
+}
+
+func (v *stringsValue) String() string {
+	return fmt.Sprintf("%q", []string(*v))
+}
+
 var errGolf = fmt.Errorf("golf returned nonzero status")
 
 type Prog struct {
 	RawArgs    []string
-	BeginSrc   string
+	BeginSrc   []string
 	RawSrc     string
-	EndSrc     string
+	EndSrc     []string
 	Src        string
 	Imports    []string
 	FlgN       bool
@@ -217,7 +233,9 @@ func init() {
 
 func main() {
 	// User -b start
-	{{.BeginSrc}}
+	{{- range .BeginSrc}}
+	{{.}}
+	{{- end }}
 	// User -b end
 	{{- if .FlgN}}
 	const _golfP = {{.FlgP}}
@@ -304,7 +322,9 @@ File:
 	_golfCloseOut()
 	{{- end}}
 	// User -E start
-	{{.EndSrc}}
+	{{- range .EndSrc}}
+	{{.}}
+	{{- end }}
 	// User -E end
 }
 `))
@@ -314,6 +334,7 @@ func (p *Prog) transform() error {
 	if err := program.Execute(s, p); err != nil {
 		return err
 	}
+
 	// Try to pretty it up, but stay silent about errors. The real compiler
 	// will give a better error message later.
 	if src, err := format.Source(s.Bytes()); err != nil {
@@ -551,9 +572,9 @@ func main() {
 	imps = dedupe(imps)
 
 	p := &Prog{
-		BeginSrc:   *beginSrc,
+		BeginSrc:   beginSrc,
 		RawSrc:     *rawSrc,
-		EndSrc:     *endSrc,
+		EndSrc:     endSrc,
 		RawArgs:    flag.Args(),
 		Imports:    imps,
 		FlgN:       *flgN,
