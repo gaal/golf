@@ -7,6 +7,7 @@ package prelude
 
 import (
 	"bytes"
+	// Required for go:embed.
 	_ "embed"
 	"fmt"
 	"io"
@@ -26,23 +27,38 @@ import (
 
 var (
 	// Updated automatically in -n mode.
-	Filename string // Current filename
-	LineNum  int    // Current line number (1-based)
-	Line     string // Current line
 
+	// Filename is the current filename.
+	Filename string
+	// LineNum is the current line number, 1-based.
+	LineNum int
+	// Line is the current line. It may be edited by the script.
+	// Its contents are automatically printed in -p mode.
+	Line string
+
+	// Fields is the Split field slice. See the convenience Field accessor.
 	// Updated automatically in -a mode.
-	Fields []string // Split field slice. See the convenience Field accessor.
+	Fields []string
 
-	IFS      = " "   // Input field separator. Overridden by -F.
-	OFS      = " "   // Output field separator
-	Warnings = false // Whether to print warnings. Overridden by -w.
-	GolfFlgL = false // Whether to stip/add newlines on I/O. Overridden by -l.
+	// IFS is the input field separator used in -a mode. Overridden by -F.
+	IFS = " "
+	// OFS is the output field separator used by Field(0).
+	OFS = " "
+	// Warnings controls whether to print warnings. Overridden by -w.
+	Warnings = false
+	// GolfFlgL controls whether to strip/add newlines on I/O. Overridden by -l.
+	GolfFlgL = false
 
 	// -i settings. Note that -i without argument is allowed, it means no backup.
-	GolfInPlace    = false
+
+	// GolfInPlace reports whether we are in-place edit mode.
+	// It is set when -i or -I were given on the command-line.
+	GolfInPlace = false
+	// GolfInPlaceBak is the file pattern for in-place edit backups.
 	GolfInPlaceBak string
 
-	// Default writer for Print and Printf. Overridden to each Filename in -i.
+	// CurOut is the default writer for Print and Printf.
+	// Overridden to each Filename in -i.
 	CurOut io.WriteCloser = os.Stdout
 )
 

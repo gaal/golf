@@ -383,6 +383,48 @@ func doQ(c string, args []string) error {
 	return nil
 }
 
+func (p *prog) writeGolf(tmpdir string) bool {
+	tmpfile := filepath.Join(tmpdir, "golfing.go")
+	if err := os.WriteFile(tmpfile, []byte(p.Src), 0640); err != nil {
+		prelude.Warn("golf: %v", err)
+		return false
+	}
+
+	if p.Goimports {
+		if err := doQ("goimports", []string{"-w", "."}); err != nil {
+			prelude.Warn("golf: goimports: %v\n", err)
+			return false
+		}
+	}
+
+	needTidy := false
+	for _, v := range p.Imports {
+		if strings.Contains(v, "/") {
+			needTidy = true
+			break
+		}
+	}
+
+	if needTidy {
+		if err := doQ("go", []string{"mod", "init", "example.com/golf"}); err != nil {
+			prelude.Warn("golf: mod init: %v\n", err)
+			return false
+		}
+		if err := doQ("go", []string{"mod", "tidy"}); err != nil {
+			prelude.Warn("golf: mod tidy: %v\n", err)
+			return false
+		}
+	} else {
+		// Write it ourselves, which is faster.
+		tidy := fmt.Sprintf("module example.com/golf\n\ngo %s\n", *goVer)
+		if err := os.WriteFile("go.mod", []byte(tidy), 0640); err != nil {
+			prelude.Warn("golf: writing mod file: %v\n", err)
+			return false
+		}
+	}
+	return true
+}
+
 func (p *prog) run() int {
 	tmpdir, err := os.MkdirTemp("", "golf-")
 	if err != nil {
@@ -395,7 +437,7 @@ func (p *prog) run() int {
 	}
 
 	if p.Keep {
-		fmt.Fprintln(os.Stderr, tmpdir)
+		prelude.Warn(tmpdir)
 	} else {
 		defer func() {
 			if err := os.RemoveAll(tmpdir); err != nil {
@@ -416,50 +458,16 @@ func (p *prog) run() int {
 		return 1
 	}
 
-	tmpfile := filepath.Join(tmpdir, "golfe.go")
-	if err := os.WriteFile(tmpfile, []byte(p.Src), 0640); err != nil {
-		prelude.Warn("golf: %v", err)
+	if ok := p.writeGolf(tmpdir); !ok {
 		return 1
-	}
-
-	if p.Goimports {
-		if err := doQ("goimports", []string{"-w", "."}); err != nil {
-			prelude.Warn("golf: goimports: %v\n", err)
-			return 1
-		}
-	}
-
-	needTidy := false
-	for _, v := range p.Imports {
-		if strings.Contains(v, "/") {
-			needTidy = true
-			break
-		}
-	}
-
-	if needTidy {
-		if err := doQ("go", []string{"mod", "init", "example.com/golf"}); err != nil {
-			fmt.Fprintf(os.Stderr, "golf: mod init: %v\n", err)
-			return 1
-		}
-		if err := doQ("go", []string{"mod", "tidy"}); err != nil {
-			fmt.Fprintf(os.Stderr, "golf: mod tidy: %v\n", err)
-			return 1
-		}
-	} else {
-		// Write it ourselves, which is faster.
-		tidy := fmt.Sprintf("module example.com/golf\n\ngo %s\n", *goVer)
-		if err := os.WriteFile("go.mod", []byte(tidy), 0640); err != nil {
-			fmt.Fprintf(os.Stderr, "golf: writing mod file: %v\n", err)
-		}
 	}
 
 	/* y u no faster?
-	if err := do("go", []string{"tool", "compile", "golfe.go"}); err != nil {
+	if err := do("go", []string{"tool", "compile", "golfing.go"}); err != nil {
 		prelude.Warn("compile: %v", err)
 		return 1
 	}
-	if err := do("go", []string{"tool", "link", "golfe.o"}); err != nil {
+	if err := do("go", []string{"tool", "link", "golfing.o"}); err != nil {
 		prelude.Warn("link: %v", err)
 		return 1
 	}

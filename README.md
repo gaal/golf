@@ -12,7 +12,7 @@ Some variables and functions are provided in the prelude package. These are
 inlined and made available to the one-liner. They are common elements of
 one-liner coding, for example the current line being processed in line mode.
 
-[godev]: https://pkg.go.dev/github.com/gaal/golf
+[godev]: https://pkg.go.dev/github.com/gaal/golf#section-documentation
 
 ## Examples
 
